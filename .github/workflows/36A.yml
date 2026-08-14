@@ -1,0 +1,89 @@
+name: Build Dylib
+on: [push, workflow_dispatch]
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Create Source Code
+        run: |
+          cat << 'EOF' > FixWKWebView.m
+          #import <Foundation/Foundation.h>
+          #import <UIKit/UIKit.h>
+          #import <WebKit/WebKit.h>
+          #import <objc/runtime.h>
+          #import <objc/message.h>
+
+          // 核心位置调整函数
+          static void checkAndAdjust(WKWebView *webView) {
+              if (!webView) return;
+              
+              NSString *urlString = webView.URL.absoluteString.lowercaseString;
+              NSString *title = webView.title;
+              
+              // 精准判断：URL 包含 qyhx 或标题叫 湖北权益超市
+              BOOL isTarget = (urlString && [urlString containsString:@"qyhx"]) ||
+                              (title && [title containsString:@"湖北权益超市"]);
+                              
+              if (isTarget) {
+                  CGRect frame = webView.frame;
+                  if (frame.origin.y == 0) {
+                      frame.origin.y = 40;
+                      [webView setFrame:frame];
+                      [webView setNeedsLayout];
+                      [webView layoutIfNeeded];
+                  }
+              }
+          }
+
+          __attribute__((constructor)) static void initFix() {
+              Class cls = NSClassFromString(@"WKWebView");
+              if (!cls) return;
+
+              // 1. Hook layoutSubviews (基本盘)
+              SEL layoutSel = @selector(layoutSubviews);
+              Method layoutMethod = class_getInstanceMethod(cls, layoutSel);
+              if (layoutMethod) {
+                  IMP origImp = method_getImplementation(layoutMethod);
+                  void (*origFunc)(id, SEL) = (void *)origImp;
+                  
+                  IMP newImp = imp_implementationWithBlock(^(id self) {
+                      origFunc(self, layoutSel);
+                      checkAndAdjust((WKWebView *)self);
+                  });
+                  method_setImplementation(layoutMethod, newImp);
+              }
+
+              // 2. Hook loadRequest: 并延迟 0.5 秒二次检测（解决 URL 加载滞后问题，替代手动切后台）
+              SEL loadSel = @selector(loadRequest:);
+              Method loadMethod = class_getInstanceMethod(cls, loadSel);
+              if (loadMethod) {
+                  IMP origLoadImp = method_getImplementation(loadMethod);
+                  id (*origLoadFunc)(id, SEL, NSURLRequest *) = (id)origLoadImp;
+                  
+                  IMP newLoadImp = imp_implementationWithBlock(^(id self, NSURLRequest *req) {
+                      id res = origLoadFunc(self, loadSel, req);
+                      
+                      // 如果请求的 URL 包含 qyhx，0.5 秒后在主线程强行触发一次刷新调整
+                      if (req.URL.absoluteString.lowercaseString && [req.URL.absoluteString.lowercaseString containsString:@"qyhx"]) {
+                          dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                              checkAndAdjust((WKWebView *)self);
+                          });
+                      }
+                      return res;
+                  });
+                  method_setImplementation(loadMethod, newLoadImp);
+              }
+          }
+          EOF
+
+      - name: Compile
+        run: |
+          xcrun -sdk iphoneos clang -dynamiclib -arch arm64 \
+          -framework Foundation -framework UIKit -framework WebKit \
+          FixWKWebView.m -o 36m.dylib
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: 36m-dylib
+          path: 36m.dylib
