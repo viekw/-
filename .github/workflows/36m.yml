@@ -1,0 +1,82 @@
+name: Build Dylib
+on: [push, workflow_dispatch]
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Create Source Code
+        run: |
+          cat << 'EOF' > FixWKWebView.m
+          #import <Foundation/Foundation.h>
+          #import <UIKit/UIKit.h>
+          #import <objc/runtime.h>
+          #import <objc/message.h>
+
+          // 辅助函数：获取 View 所在的 UIViewController
+          static UIViewController* getResponderViewController(UIView *view) {
+              UIResponder *responder = view;
+              while (responder) {
+                  if ([responder isKindOfClass:[UIViewController class]]) {
+                      return (UIViewController *)responder;
+                  }
+                  responder = [responder nextResponder];
+              }
+              return nil;
+          }
+
+          __attribute__((constructor)) static void initFix() {
+              Class cls = NSClassFromString(@"WKWebView");
+              if (!cls) return;
+              SEL sel = @selector(layoutSubviews);
+              Method method = class_getInstanceMethod(cls, sel);
+              if (!method) return;
+              IMP origImp = method_getImplementation(method);
+              void (*origFunc)(id, SEL) = (void *)origImp;
+              
+              IMP newImp = imp_implementationWithBlock(^(id self) {
+                  origFunc(self, @selector(layoutSubviews));
+                  
+                  // 1. 判断控制器是不是 WebViewController
+                  UIViewController *vc = getResponderViewController((UIView *)self);
+                  if (vc) {
+                      NSString *vcClassName = NSStringFromClass([vc class]);
+                      
+                      if ([vcClassName containsString:@"WebViewController"]) {
+                          
+                          // 2. 获取当前 WKWebView 的 URL 和 title
+                          NSURL *url = ((id (*)(id, SEL))objc_msgSend)(self, @selector(URL));
+                          NSString *urlString = url.absoluteString.lowercaseString;
+                          
+                          NSString *title = ((id (*)(id, SEL))objc_msgSend)(self, @selector(title));
+                          
+                          // 3. 严格精准匹配：必须包含 qyhx 或者 标题叫湖北权益超市
+                          BOOL isTargetPage = (urlString && [urlString containsString:@"qyhx"]) || 
+                                             (title && [title containsString:@"湖北权益超市"]);
+                          
+                          if (isTargetPage) {
+                              CGRect frame = ((CGRect (*)(id, SEL))objc_msgSend)(self, @selector(frame));
+                              // 如果起点还在最顶端 0 的位置，才下移 40
+                              if (frame.origin.y == 0) {
+                                  frame.origin.y = 40;
+                                  ((void (*)(id, SEL, CGRect))objc_msgSend)(self, @selector(setFrame:), frame);
+                              }
+                          }
+                      }
+                  }
+              });
+              
+              method_setImplementation(method, newImp);
+          }
+          EOF
+
+      - name: Compile
+        run: |
+          xcrun -sdk iphoneos clang -dynamiclib -arch arm64 \
+          -framework Foundation -framework UIKit \
+          FixWKWebView.m -o 36m.dylib
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: 36m-dylib
+          path: 36m.dylib
