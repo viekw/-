@@ -12,6 +12,7 @@ jobs:
           #import <WebKit/WebKit.h>
           #import <objc/runtime.h>
 
+          // 1. UI 调整函数（保持之前的 40px 下移）
           static void adjustFrame(WKWebView *webView) {
               if (!webView || !webView.window) return;
               
@@ -22,11 +23,10 @@ jobs:
                               (title && [title containsString:@"湖北权益超市"]);
                               
               if (isTarget) {
-                  // 下移 WKWebView 自身
                   CGRect frame = webView.frame;
                   if (frame.origin.y == 0) {
                       frame.origin.y = 40;
-                      frame.size.height -= 40; // 适当缩减高度防止底部超屏
+                      frame.size.height -= 40;
                       [webView setFrame:frame];
                   }
               }
@@ -36,7 +36,7 @@ jobs:
               Class cls = NSClassFromString(@"WKWebView");
               if (!cls) return;
 
-              // 1. Hook layoutSubviews（界面重绘时自动下移）
+              // ----------------- UI 布局修正 -----------------
               SEL layoutSel = @selector(layoutSubviews);
               Method layoutMethod = class_getInstanceMethod(cls, layoutSel);
               if (layoutMethod) {
@@ -50,22 +50,30 @@ jobs:
                   method_setImplementation(layoutMethod, newImp);
               }
 
-              // 2. Hook didMoveToWindow（刚加载进屏幕时，延迟 0.3 秒自动下移一次，解决无须切后台问题）
-              SEL didMoveSel = @selector(didMoveToWindow);
-              Method didMoveMethod = class_getInstanceMethod(cls, didMoveSel);
-              if (didMoveMethod) {
-                  IMP origDidMoveImp = method_getImplementation(didMoveMethod);
-                  void (*origDidMoveFunc)(id, SEL) = (void *)origDidMoveImp;
+              // ----------------- Token 登录态修复 -----------------
+              // Hook loadRequest: 强制给 H5 请求共享系统的 HTTPCookieStorage，确保登录态透传
+              SEL loadSel = @selector(loadRequest:);
+              Method loadMethod = class_getInstanceMethod(cls, loadSel);
+              if (loadMethod) {
+                  IMP origLoadImp = method_getImplementation(loadMethod);
+                  id (*origLoadFunc)(id, SEL, NSURLRequest *) = (id)origLoadImp;
                   
-                  IMP newDidMoveImp = imp_implementationWithBlock(^(id self) {
-                      origDidMoveFunc(self, didMoveSel);
-                      
+                  IMP newLoadImp = imp_implementationWithBlock(^(id self, NSURLRequest *request) {
                       WKWebView *webView = (WKWebView *)self;
-                      dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                          adjustFrame(webView);
-                      });
+                      NSMutableURLRequest *mutableReq = [request mutableCopy];
+                      
+                      // 如果是目标 H5 页面，强制注入 Cookie Storage 中的最新登录凭证
+                      if ([request.URL.absoluteString.lowercaseString containsString:@"qyhx"]) {
+                          NSArray<NSHTTPCookie *> *cookies = [[NSHTTPCookieStorage sharedHTTPCookieStorage] cookiesForURL:request.URL];
+                          NSDictionary *headers = [NSHTTPCookie requestHeaderFieldsWithCookies:cookies];
+                          for (NSString *key in headers) {
+                              [mutableReq setValue:headers[key] forHTTPHeaderField:key];
+                          }
+                      }
+                      
+                      return origLoadFunc(webView, loadSel, mutableReq);
                   });
-                  method_setImplementation(didMoveMethod, newDidMoveImp);
+                  method_setImplementation(loadMethod, newLoadImp);
               }
           }
           EOF
