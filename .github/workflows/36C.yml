@@ -13,14 +13,12 @@ jobs:
           #import <objc/runtime.h>
           #import <objc/message.h>
 
-          // 核心位置调整函数
-          static void checkAndAdjust(WKWebView *webView) {
+          static void adjustWebView(WKWebView *webView) {
               if (!webView) return;
               
               NSString *urlString = webView.URL.absoluteString.lowercaseString;
               NSString *title = webView.title;
               
-              // 精准判断：URL 包含 qyhx 或标题叫 湖北权益超市
               BOOL isTarget = (urlString && [urlString containsString:@"qyhx"]) ||
                               (title && [title containsString:@"湖北权益超市"]);
                               
@@ -31,6 +29,12 @@ jobs:
                       [webView setFrame:frame];
                       [webView setNeedsLayout];
                       [webView layoutIfNeeded];
+                      
+                      // 同时也尝试修改父视图的 layout
+                      if (webView.superview) {
+                          [webView.superview setNeedsLayout];
+                          [webView.superview layoutIfNeeded];
+                      }
                   }
               }
           }
@@ -39,39 +43,27 @@ jobs:
               Class cls = NSClassFromString(@"WKWebView");
               if (!cls) return;
 
-              // 1. Hook layoutSubviews (基本盘)
-              SEL layoutSel = @selector(layoutSubviews);
-              Method layoutMethod = class_getInstanceMethod(cls, layoutSel);
-              if (layoutMethod) {
-                  IMP origImp = method_getImplementation(layoutMethod);
+              // Hook didMoveToWindow: 当 WebView 被放到屏幕上时触发
+              SEL didMoveSel = @selector(didMoveToWindow);
+              Method didMoveMethod = class_getInstanceMethod(cls, didMoveSel);
+              if (didMoveMethod) {
+                  IMP origImp = method_getImplementation(didMoveMethod);
                   void (*origFunc)(id, SEL) = (void *)origImp;
                   
                   IMP newImp = imp_implementationWithBlock(^(id self) {
-                      origFunc(self, layoutSel);
-                      checkAndAdjust((WKWebView *)self);
-                  });
-                  method_setImplementation(layoutMethod, newImp);
-              }
-
-              // 2. Hook loadRequest: 并延迟 0.5 秒二次检测（解决 URL 加载滞后问题，替代手动切后台）
-              SEL loadSel = @selector(loadRequest:);
-              Method loadMethod = class_getInstanceMethod(cls, loadSel);
-              if (loadMethod) {
-                  IMP origLoadImp = method_getImplementation(loadMethod);
-                  id (*origLoadFunc)(id, SEL, NSURLRequest *) = (id)origLoadImp;
-                  
-                  IMP newLoadImp = imp_implementationWithBlock(^(id self, NSURLRequest *req) {
-                      id res = origLoadFunc(self, loadSel, req);
+                      origFunc(self, didMoveSel);
                       
-                      // 如果请求的 URL 包含 qyhx，0.5 秒后在主线程强行触发一次刷新调整
-                      if (req.URL.absoluteString.lowercaseString && [req.URL.absoluteString.lowercaseString containsString:@"qyhx"]) {
-                          dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                              checkAndAdjust((WKWebView *)self);
-                          });
+                      WKWebView *webView = (WKWebView *)self;
+                      if (webView.window) {
+                          // 开启一个轮询：连续检测 5 次（每 0.4 秒一次），覆盖 H5 异步加载的时间段
+                          for (int i = 1; i <= 5; i++) {
+                              dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(i * 0.4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                                  adjustWebView(webView);
+                              });
+                          }
                       }
-                      return res;
                   });
-                  method_setImplementation(loadMethod, newLoadImp);
+                  method_setImplementation(didMoveMethod, newImp);
               }
           }
           EOF
