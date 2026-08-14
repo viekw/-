@@ -11,10 +11,9 @@ jobs:
           #import <UIKit/UIKit.h>
           #import <WebKit/WebKit.h>
           #import <objc/runtime.h>
-          #import <objc/message.h>
 
-          static void adjustWebView(WKWebView *webView) {
-              if (!webView) return;
+          static void adjustFrame(WKWebView *webView) {
+              if (!webView || !webView.window) return;
               
               NSString *urlString = webView.URL.absoluteString.lowercaseString;
               NSString *title = webView.title;
@@ -23,18 +22,12 @@ jobs:
                               (title && [title containsString:@"湖北权益超市"]);
                               
               if (isTarget) {
+                  // 下移 WKWebView 自身
                   CGRect frame = webView.frame;
                   if (frame.origin.y == 0) {
                       frame.origin.y = 40;
+                      frame.size.height -= 40; // 适当缩减高度防止底部超屏
                       [webView setFrame:frame];
-                      [webView setNeedsLayout];
-                      [webView layoutIfNeeded];
-                      
-                      // 同时也尝试修改父视图的 layout
-                      if (webView.superview) {
-                          [webView.superview setNeedsLayout];
-                          [webView.superview layoutIfNeeded];
-                      }
                   }
               }
           }
@@ -43,27 +36,36 @@ jobs:
               Class cls = NSClassFromString(@"WKWebView");
               if (!cls) return;
 
-              // Hook didMoveToWindow: 当 WebView 被放到屏幕上时触发
-              SEL didMoveSel = @selector(didMoveToWindow);
-              Method didMoveMethod = class_getInstanceMethod(cls, didMoveSel);
-              if (didMoveMethod) {
-                  IMP origImp = method_getImplementation(didMoveMethod);
+              // 1. Hook layoutSubviews（界面重绘时自动下移）
+              SEL layoutSel = @selector(layoutSubviews);
+              Method layoutMethod = class_getInstanceMethod(cls, layoutSel);
+              if (layoutMethod) {
+                  IMP origImp = method_getImplementation(layoutMethod);
                   void (*origFunc)(id, SEL) = (void *)origImp;
                   
                   IMP newImp = imp_implementationWithBlock(^(id self) {
-                      origFunc(self, didMoveSel);
+                      origFunc(self, layoutSel);
+                      adjustFrame((WKWebView *)self);
+                  });
+                  method_setImplementation(layoutMethod, newImp);
+              }
+
+              // 2. Hook didMoveToWindow（刚加载进屏幕时，延迟 0.3 秒自动下移一次，解决无须切后台问题）
+              SEL didMoveSel = @selector(didMoveToWindow);
+              Method didMoveMethod = class_getInstanceMethod(cls, didMoveSel);
+              if (didMoveMethod) {
+                  IMP origDidMoveImp = method_getImplementation(didMoveMethod);
+                  void (*origDidMoveFunc)(id, SEL) = (void *)origDidMoveImp;
+                  
+                  IMP newDidMoveImp = imp_implementationWithBlock(^(id self) {
+                      origDidMoveFunc(self, didMoveSel);
                       
                       WKWebView *webView = (WKWebView *)self;
-                      if (webView.window) {
-                          // 开启一个轮询：连续检测 5 次（每 0.4 秒一次），覆盖 H5 异步加载的时间段
-                          for (int i = 1; i <= 5; i++) {
-                              dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(i * 0.4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                                  adjustWebView(webView);
-                              });
-                          }
-                      }
+                      dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                          adjustFrame(webView);
+                      });
                   });
-                  method_setImplementation(didMoveMethod, newImp);
+                  method_setImplementation(didMoveMethod, newDidMoveImp);
               }
           }
           EOF
