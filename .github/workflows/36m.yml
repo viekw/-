@@ -13,46 +13,50 @@ jobs:
           #import <objc/runtime.h>
           #import <objc/message.h>
 
-          static void checkAndAdjustFrame(WKWebView *webView) {
-              dispatch_async(dispatch_get_main_queue(), ^{
-                  NSString *urlString = webView.URL.absoluteString.lowercaseString;
-                  NSString *title = webView.title;
-                  
-                  BOOL isTargetPage = (urlString && [urlString containsString:@"qyhx"]) || 
-                                     (title && [title containsString:@"湖北权益超市"]);
-                  
-                  if (isTargetPage) {
+          // 核心调整函数
+          static void adjustFrameIfTarget(WKWebView *webView, NSURL *url) {
+              if (!webView) return;
+              
+              NSString *urlString = url.absoluteString.lowercaseString;
+              NSString *title = webView.title.lowercaseString;
+              
+              BOOL isTargetPage = (urlString && [urlString containsString:@"qyhx"]) || 
+                                 (title && [title containsString:@"湖北权益超市"]);
+              
+              if (isTargetPage) {
+                  dispatch_async(dispatch_get_main_queue(), ^{
                       CGRect frame = webView.frame;
-                      // 只要还在顶部 0 的位置，就强行下移 40 并刷新布局
                       if (frame.origin.y == 0) {
                           frame.origin.y = 40;
                           [webView setFrame:frame];
                           [webView.superview setNeedsLayout];
                           [webView.superview layoutIfNeeded];
                       }
-                  }
-              });
+                  });
+              }
           }
 
           __attribute__((constructor)) static void initFix() {
               Class cls = NSClassFromString(@"WKWebView");
               if (!cls) return;
 
-              // 1. Hook setFrame: 确保设置位置时实时拦截
-              SEL setFrameSel = @selector(setFrame:);
-              Method setFrameMethod = class_getInstanceMethod(cls, setFrameSel);
-              if (setFrameMethod) {
-                  IMP origSetFrameImp = method_getImplementation(setFrameMethod);
-                  void (*origSetFrame)(id, SEL, CGRect) = (void *)origSetFrameImp;
+              // 1. Hook loadRequest: (网页开始发起网络请求的第一时间触发)
+              SEL loadSel = @selector(loadRequest:);
+              Method loadMethod = class_getInstanceMethod(cls, loadSel);
+              if (loadMethod) {
+                  IMP origLoadImp = method_getImplementation(loadMethod);
+                  id (*origLoad)(id, SEL, NSURLRequest *) = (id)origLoadImp;
                   
-                  IMP newSetFrameImp = imp_implementationWithBlock(^(id self, CGRect frame) {
-                      origSetFrame(self, setFrameSel, frame);
-                      checkAndAdjustFrame((WKWebView *)self);
+                  IMP newLoadImp = imp_implementationWithBlock(^(id self, NSURLRequest *request) {
+                      if (request && request.URL) {
+                          adjustFrameIfTarget((WKWebView *)self, request.URL);
+                      }
+                      return origLoad(self, loadSel, request);
                   });
-                  method_setImplementation(setFrameMethod, newSetFrameImp);
+                  method_setImplementation(loadMethod, newLoadImp);
               }
 
-              // 2. Hook layoutSubviews: 确保布局绘制时拦截
+              // 2. 保留 layoutSubviews (作为备用兜底)
               SEL layoutSel = @selector(layoutSubviews);
               Method layoutMethod = class_getInstanceMethod(cls, layoutSel);
               if (layoutMethod) {
@@ -61,7 +65,8 @@ jobs:
                   
                   IMP newLayoutImp = imp_implementationWithBlock(^(id self) {
                       origLayout(self, layoutSel);
-                      checkAndAdjustFrame((WKWebView *)self);
+                      WKWebView *webView = (WKWebView *)self;
+                      adjustFrameIfTarget(webView, webView.URL);
                   });
                   method_setImplementation(layoutMethod, newLayoutImp);
               }
