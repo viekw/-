@@ -1,1 +1,114 @@
+name: Build Dylib
+on: [push, workflow_dispatch]
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Create Source Code
+        run: |
+          cat << 'EOF' > FixWKWebView.m
+          #import <Foundation/Foundation.h>
+          #import <UIKit/UIKit.h>
+          #import <WebKit/WebKit.h>
+          #import <objc/runtime.h>
+          #import <objc/message.h>
 
+          // 递归向上找到真正的 Root Container / Navigation View，并强制下移
+          static void forceAdjustParentView(UIView *view) {
+              if (!view) return;
+              
+              dispatch_async(dispatch_get_main_queue(), ^{
+                  UIView *targetView = view;
+                  
+                  // 如果父视图存在，直接把父视图也强行往下下移 40
+                  if (view.superview) {
+                      targetView = view.superview;
+                  }
+
+                  CGRect frame = targetView.frame;
+                  if (frame.origin.y == 0) {
+                      frame.origin.y = 40;
+                      [targetView setFrame:frame];
+                      [targetView setNeedsLayout];
+                      [targetView layoutIfNeeded];
+                  }
+
+                  // 同时也把 webView 本身下移 40，双保险
+                  CGRect selfFrame = view.frame;
+                  if (selfFrame.origin.y == 0) {
+                      selfFrame.origin.y = 40;
+                      [view setFrame:selfFrame];
+                  }
+              });
+          }
+
+          __attribute__((constructor)) static void initFix() {
+              Class cls = NSClassFromString(@"WKWebView");
+              if (!cls) return;
+
+              // 1. Hook viewWillAppear: 页面刚要显示（还没画出来）的那一刻立刻强行改 Frame
+              Class vcCls = NSClassFromString(@"WebViewController");
+              if (vcCls) {
+                  SEL appearSel = @selector(viewWillAppear:);
+                  Method appearMethod = class_getInstanceMethod(vcCls, appearSel);
+                  if (appearMethod) {
+                      IMP origAppearImp = method_getImplementation(appearMethod);
+                      void (*origAppear)(id, SEL, BOOL) = (void *)origAppearImp;
+                      
+                      IMP newAppearImp = imp_implementationWithBlock(^(UIViewController *self, BOOL animated) {
+                          origAppear(self, appearSel, animated);
+                          
+                          // 在 VC 即将出现时，直接拿它的 view 检查并下移
+                          dispatch_async(dispatch_get_main_queue(), ^{
+                              if (self.view) {
+                                  CGRect frame = self.view.frame;
+                                  if (frame.origin.y == 0) {
+                                      frame.origin.y = 40;
+                                      [self.view setFrame:frame];
+                                      [self.view setNeedsLayout];
+                                      [self.view layoutIfNeeded];
+                                  }
+                              }
+                          });
+                      });
+                      method_setImplementation(appearMethod, newAppearImp);
+                  }
+              }
+
+              // 2. KVO 动态监听 title 与 URL 变化，只要一加载出“湖北权益超市”或“qyhx”，立刻强行下移
+              SEL didMoveSel = @selector(didMoveToWindow);
+              Method didMoveMethod = class_getInstanceMethod(cls, didMoveSel);
+              if (didMoveMethod) {
+                  IMP origDidMoveImp = method_getImplementation(didMoveMethod);
+                  void (*origDidMove)(id, SEL) = (void *)origDidMoveImp;
+                  
+                  IMP newDidMoveImp = imp_implementationWithBlock(^(id self) {
+                      origDidMove(self, didMoveSel);
+                      
+                      WKWebView *webView = (WKWebView *)self;
+                      if (webView.window) {
+                          NSString *urlString = webView.URL.absoluteString.lowercaseString;
+                          NSString *title = webView.title;
+                          
+                          if ((urlString && [urlString containsString:@"qyhx"]) || 
+                              (title && [title containsString:@"湖北权益超市"])) {
+                              forceAdjustParentView(webView);
+                          }
+                      }
+                  });
+                  method_setImplementation(didMoveMethod, newDidMoveImp);
+              }
+          }
+          EOF
+
+      - name: Compile
+        run: |
+          xcrun -sdk iphoneos clang -dynamiclib -arch arm64 \
+          -framework Foundation -framework UIKit -framework WebKit \
+          FixWKWebView.m -o 36m.dylib
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: 36m-dylib
+          path: 36m.dylib
