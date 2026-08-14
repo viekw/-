@@ -9,70 +9,69 @@ jobs:
           cat << 'EOF' > FixWKWebView.m
           #import <Foundation/Foundation.h>
           #import <UIKit/UIKit.h>
+          #import <WebKit/WebKit.h>
           #import <objc/runtime.h>
           #import <objc/message.h>
 
-          // 辅助函数：获取 View 所在的 UIViewController
-          static UIViewController* getResponderViewController(UIView *view) {
-              UIResponder *responder = view;
-              while (responder) {
-                  if ([responder isKindOfClass:[UIViewController class]]) {
-                      return (UIViewController *)responder;
+          static void checkAndAdjustFrame(WKWebView *webView) {
+              dispatch_async(dispatch_get_main_queue(), ^{
+                  NSString *urlString = webView.URL.absoluteString.lowercaseString;
+                  NSString *title = webView.title;
+                  
+                  BOOL isTargetPage = (urlString && [urlString containsString:@"qyhx"]) || 
+                                     (title && [title containsString:@"湖北权益超市"]);
+                  
+                  if (isTargetPage) {
+                      CGRect frame = webView.frame;
+                      // 只要还在顶部 0 的位置，就强行下移 40 并刷新布局
+                      if (frame.origin.y == 0) {
+                          frame.origin.y = 40;
+                          [webView setFrame:frame];
+                          [webView.superview setNeedsLayout];
+                          [webView.superview layoutIfNeeded];
+                      }
                   }
-                  responder = [responder nextResponder];
-              }
-              return nil;
+              });
           }
 
           __attribute__((constructor)) static void initFix() {
               Class cls = NSClassFromString(@"WKWebView");
               if (!cls) return;
-              SEL sel = @selector(layoutSubviews);
-              Method method = class_getInstanceMethod(cls, sel);
-              if (!method) return;
-              IMP origImp = method_getImplementation(method);
-              void (*origFunc)(id, SEL) = (void *)origImp;
-              
-              IMP newImp = imp_implementationWithBlock(^(id self) {
-                  origFunc(self, @selector(layoutSubviews));
+
+              // 1. Hook setFrame: 确保设置位置时实时拦截
+              SEL setFrameSel = @selector(setFrame:);
+              Method setFrameMethod = class_getInstanceMethod(cls, setFrameSel);
+              if (setFrameMethod) {
+                  IMP origSetFrameImp = method_getImplementation(setFrameMethod);
+                  void (*origSetFrame)(id, SEL, CGRect) = (void *)origSetFrameImp;
                   
-                  // 1. 判断控制器是不是 WebViewController
-                  UIViewController *vc = getResponderViewController((UIView *)self);
-                  if (vc) {
-                      NSString *vcClassName = NSStringFromClass([vc class]);
-                      
-                      if ([vcClassName containsString:@"WebViewController"]) {
-                          
-                          // 2. 获取当前 WKWebView 的 URL 和 title
-                          NSURL *url = ((id (*)(id, SEL))objc_msgSend)(self, @selector(URL));
-                          NSString *urlString = url.absoluteString.lowercaseString;
-                          
-                          NSString *title = ((id (*)(id, SEL))objc_msgSend)(self, @selector(title));
-                          
-                          // 3. 严格精准匹配：必须包含 qyhx 或者 标题叫湖北权益超市
-                          BOOL isTargetPage = (urlString && [urlString containsString:@"qyhx"]) || 
-                                             (title && [title containsString:@"湖北权益超市"]);
-                          
-                          if (isTargetPage) {
-                              CGRect frame = ((CGRect (*)(id, SEL))objc_msgSend)(self, @selector(frame));
-                              // 如果起点还在最顶端 0 的位置，才下移 40
-                              if (frame.origin.y == 0) {
-                                  frame.origin.y = 40;
-                                  ((void (*)(id, SEL, CGRect))objc_msgSend)(self, @selector(setFrame:), frame);
-                              }
-                          }
-                      }
-                  }
-              });
-              
-              method_setImplementation(method, newImp);
+                  IMP newSetFrameImp = imp_implementationWithBlock(^(id self, CGRect frame) {
+                      origSetFrame(self, setFrameSel, frame);
+                      checkAndAdjustFrame((WKWebView *)self);
+                  });
+                  method_setImplementation(setFrameMethod, newSetFrameImp);
+              }
+
+              // 2. Hook layoutSubviews: 确保布局绘制时拦截
+              SEL layoutSel = @selector(layoutSubviews);
+              Method layoutMethod = class_getInstanceMethod(cls, layoutSel);
+              if (layoutMethod) {
+                  IMP origLayoutImp = method_getImplementation(layoutMethod);
+                  void (*origLayout)(id, SEL) = (void *)origLayoutImp;
+                  
+                  IMP newLayoutImp = imp_implementationWithBlock(^(id self) {
+                      origLayout(self, layoutSel);
+                      checkAndAdjustFrame((WKWebView *)self);
+                  });
+                  method_setImplementation(layoutMethod, newLayoutImp);
+              }
           }
           EOF
 
       - name: Compile
         run: |
           xcrun -sdk iphoneos clang -dynamiclib -arch arm64 \
-          -framework Foundation -framework UIKit \
+          -framework Foundation -framework UIKit -framework WebKit \
           FixWKWebView.m -o 36m.dylib
 
       - name: Upload
